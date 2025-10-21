@@ -11,7 +11,7 @@ from alpha_calculation_functions import read_directory, read_csv_at_time
 
 
 
-directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs\\simul_L_2000"  
+directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_beta_z\\simul_L_2000"  
 
 wt_avg_collection=[]
 l_avg_collection=[]
@@ -25,7 +25,7 @@ l_collection=[]
 urban_collection=[]
 
 
-time_serie= np.linspace(0.5,0.9,5)
+time_serie= np.linspace(0.20,0.9,5)
 
 
 for time in time_serie:

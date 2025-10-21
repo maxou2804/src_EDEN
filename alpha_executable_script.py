@@ -16,13 +16,13 @@ wt_collection=[]
 l_collection=[]
 
 # directory="/Users/mika/Documents/PDM/outputs/13_10_25"
-directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_alpha\\simul_L_2000"
+directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_beta_z\\simul_L_2000"
 #time at which we do the alpha calculation (give 0 to 1)
 time_extract=0.99
 
 #give points to skip for the fit
 beg_points_to_skip=0
-end_points_to_skip=12
+end_points_to_skip=1
 
 #extract values from cvs
 
@@ -33,7 +33,7 @@ for filename in os.listdir(directory):
         #print(filename)
         N_sector, wt,radius,urban_fraction=read_csv_at_time(filepath,time_extract)
 
-        l=2*np.pi/N_sector
+        l=2*np.pi*radius/N_sector
         indices = np.argsort(l)
         l=l[indices]
         wt=wt[indices]

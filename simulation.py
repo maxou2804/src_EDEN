@@ -8,6 +8,100 @@ from numba import types
 from numba.types import int64, float64
 
 @nb.njit(fastmath=True, cache=True)
+def initialize_front_from_core(core_ys, core_xs, core_count, cx, cy, num_angles):
+    """
+    One-time computation: Build initial r_max from existing core.
+    Only called once at simulation start or when num_angles changes.
+    
+    Returns
+    -------
+    r_max : array
+        Maximum radius in each angular bin.
+    """
+    two_pi = 2 * np.pi
+    bin_width = two_pi / num_angles
+    r_max = np.zeros(num_angles, dtype=float64)
+    
+    for i in range(core_count):
+        x, y = float64(core_xs[i]), float64(core_ys[i])
+        dx = x - cx
+        dy = y - cy
+        dist = sqrt(dx * dx + dy * dy)
+        theta = (atan2(dy, dx) + two_pi) % two_pi
+        bin_idx = int64(floor(theta / bin_width))
+        if bin_idx >= num_angles:
+            bin_idx = num_angles - 1
+        if dist > r_max[bin_idx]:
+            r_max[bin_idx] = dist
+    
+    return r_max
+
+
+@nb.njit(fastmath=True, cache=True)
+def update_front_incremental(
+    r_max, 
+    core_ys, core_xs, 
+    start_idx, end_idx,
+    cx, cy, 
+    num_angles
+):
+    """
+    FAST INCREMENTAL UPDATE: Only update r_max for newly grown cells.
+    
+    This is the critical optimization for large grids!
+    Instead of recomputing front from ALL core cells (expensive),
+    only update bins affected by newly grown cells (cheap).
+    
+    Parameters
+    ----------
+    r_max : array
+        Current front array (modified in-place).
+    core_ys, core_xs : arrays
+        Core cell coordinates.
+    start_idx : int
+        Index of first new cell (inclusive).
+    end_idx : int
+        Index after last new cell (exclusive).
+    cx, cy : float
+        Center coordinates.
+    num_angles : int
+        Number of angular bins.
+    
+    Returns
+    -------
+    r_max : array
+        Updated front array.
+    
+    Example
+    -------
+    If core had 4,500,000 cells and batch grew 1,500 more:
+        start_idx = 4,500,000
+        end_idx = 4,501,500
+        → Only process 1,500 cells instead of 4,501,500!
+        → 3000x speedup for front computation!
+    """
+    two_pi = 2 * np.pi
+    bin_width = two_pi / num_angles
+    
+    # Only iterate through newly grown cells
+    for i in range(start_idx, end_idx):
+        x, y = float64(core_xs[i]), float64(core_ys[i])
+        dx = x - cx
+        dy = y - cy
+        dist = sqrt(dx * dx + dy * dy)
+        theta = (atan2(dy, dx) + two_pi) % two_pi
+        bin_idx = int64(floor(theta / bin_width))
+        if bin_idx >= num_angles:
+            bin_idx = num_angles - 1
+        
+        # Update only if this cell is farther than current max
+        if dist > r_max[bin_idx]:
+            r_max[bin_idx] = dist
+    
+    return r_max
+
+
+@nb.njit(fastmath=True, cache=True)
 def compute_sector_stats(theta_sorted, r_sorted, N):
     """Numba-optimized sector statistics computation."""
     bin_edges = np.linspace(0, 2 * np.pi, N + 1)
@@ -127,7 +221,10 @@ def compute_front_from_core(core_ys, core_xs, core_count, cx, cy, num_angles):
 
 @nb.njit(fastmath=True, cache=True)
 def extract_front_points(r_max, num_angles):
-    """Extract valid front points from r_max array."""
+    """
+    Extract valid front points from r_max array.
+    IMPORTANT: Output is ALREADY SORTED by theta (no additional sorting needed!)
+    """
     two_pi = 2 * np.pi
     bin_width = two_pi / num_angles
     
@@ -144,9 +241,10 @@ def extract_front_points(r_max, num_angles):
     for i in range(num_angles):
         if r_max[i] > 0:
             r_front[idx] = r_max[i]
-            theta_front[idx] = (i + 0.5) * bin_width
+            theta_front[idx] = (i + 0.5) * bin_width  # Monotonically increasing!
             idx += 1
     
+    # theta_front is already sorted because we iterate i=0,1,2,...
     return r_front, theta_front
 
 
@@ -157,14 +255,15 @@ def simulate(
     timesteps,
     k,
     prob=1.0,
-    sampling=1,
-    max_bins=20000,
+    sampling=0.5,
+    max_bins=None,
     min_bins=100,
     adaptive_binning=True,
     batch_size_mode='adaptive',
-    batch_size_param=0.1,
+    batch_size_param=0.2,
+    metric_interval=None,
     output_file=None,
-    visualize_interval=1000
+    visualize_interval=20
 ):
     """
     Optimized Eden growth simulation with:
@@ -200,6 +299,23 @@ def simulate(
     adaptive_binning : bool
         If True, recompute num_bins each batch based on current radius.
         If False, use fixed binning based on initial estimate.
+    batch_size_mode : str or int
+        Batch growth mode. Options:
+        - 'adaptive' (default): batch_size = batch_size_param × perimeter
+        - 'fixed': constant batch_size = batch_size_param (int)
+        - 'single' or 0 or 1: grow one cell at a time (no batching, slowest but exact)
+        - int value: use that as fixed batch size
+    batch_size_param : float or int
+        Parameter for batch sizing:
+        - If batch_size_mode='adaptive': relative size (e.g., 0.2 = 20% of perimeter)
+        - If batch_size_mode='fixed': absolute number of cells per batch
+        - Ignored if batch_size_mode='single'/0/1
+    metric_interval : int, optional
+        Compute metrics only every N timesteps (sparse sampling).
+        If None, computes metrics after every batch (default, slower).
+        Recommended: 100-1000 for large simulations to reduce overhead.
+        Example: metric_interval=500 with batch=500 → metrics every batch
+                 metric_interval=5000 with batch=500 → metrics every 10 batches
     output_file : str, optional
         CSV file path for streaming output.
     visualize_interval : int
@@ -243,8 +359,10 @@ def simulate(
         N_sectors_results = []
         urban_fraction_list = []
     
-    # OPTIMIZED BOUNDARY BUFFER: Pre-allocated arrays
-    max_boundary = min(grid_size * 4, 100000)  # Cap for memory
+    # OPTIMIZED BOUNDARY BUFFER: Scale with expected max perimeter
+    max_radius = grid_size / np.sqrt(2)
+    max_perimeter = int(2 * np.pi * max_radius * 1.5)  # 50% safety margin
+    max_boundary = min(max_perimeter, 200000)  # Cap for very large grids
     boundary_y = np.zeros(max_boundary, dtype=np.int64)
     boundary_x = np.zeros(max_boundary, dtype=np.int64)
     
@@ -292,19 +410,66 @@ def simulate(
         num_angles_fixed = min(max(num_angles_fixed, min_bins), max_angles)
         print(f"Fixed binning mode: {num_angles_fixed} bins")
     
+    # SPARSE METRICS: Determine when to compute metrics
+    if metric_interval is None:
+        # Default: compute after every batch
+        compute_metrics_every_batch = True
+        metric_interval = 1  # Not used but set for consistency
+    else:
+        compute_metrics_every_batch = False
+        print(f"Sparse metrics: computing every {metric_interval} timesteps")
+    
+    last_metric_t = -metric_interval  # Ensure we compute at t=0 or first batch
+    
+    # ---------- BATCH SIZE CONFIGURATION ----------
+    # Parse batch_size_mode
+    if batch_size_mode == 'single' or batch_size_mode == 0 or batch_size_mode == 1:
+        use_single_cell = True
+        use_adaptive_batch = False
+        fixed_batch_size = 1
+        print(f"Batch mode: SINGLE CELL (growing one site at a time)")
+    elif batch_size_mode == 'adaptive':
+        use_single_cell = False
+        use_adaptive_batch = True
+        batch_proportion = float(batch_size_param)
+        print(f"Batch mode: ADAPTIVE ({batch_proportion*100:.1f}% of perimeter)")
+    elif batch_size_mode == 'fixed' or isinstance(batch_size_mode, int):
+        use_single_cell = False
+        use_adaptive_batch = False
+        if isinstance(batch_size_mode, int):
+            fixed_batch_size = batch_size_mode
+        else:
+            fixed_batch_size = int(batch_size_param)
+        print(f"Batch mode: FIXED ({fixed_batch_size} cells per batch)")
+    else:
+        raise ValueError(f"Invalid batch_size_mode: {batch_size_mode}. "
+                        f"Use 'single', 'adaptive', 'fixed', or an integer.")
+    
     # ---------- MAIN SIMULATION LOOP ----------
-    batch_size = 10  # Initial batch size (will be adaptive)
+    batch_size = fixed_batch_size if not use_adaptive_batch else 10  # Initial value
     t = 0
     batch_step = 0
     urban_cells = np.count_nonzero(urban)
     
     print(f"Starting simulation: {grid_size}x{grid_size} grid, {timesteps} timesteps")
-    print(f"Initial boundary: {boundary_count} cells, Initial core: {core_count} cells")
+    print(f"Initial boundary: {boundary_count} cells (buffer: {max_boundary}), Initial core: {core_count} cells")
     print(f"Binning: sampling={sampling}, max_bins={max_angles}, min_bins={min_bins}, adaptive={adaptive_binning}")
     
     while t < timesteps:
         batch_step += 1
-        current_batch = min(batch_size, timesteps - t)
+        
+        # Determine batch size for this iteration
+        if use_single_cell:
+            current_batch = 1  # Always grow one cell
+        elif use_adaptive_batch:
+            # Adaptive: based on current perimeter
+            current_batch = batch_size  # Will be updated below
+        else:
+            # Fixed: use predetermined size
+            current_batch = min(fixed_batch_size, timesteps - t)
+        
+        # Don't exceed remaining timesteps
+        current_batch = min(current_batch, timesteps - t)
         
         # OPTIMIZED GROWTH (Numba-accelerated)
         boundary_count, core_count, cells_grown = grow_batch_optimized(
@@ -320,8 +485,14 @@ def simulate(
         if t >= timesteps:
             t = timesteps
         
+        # SPARSE METRICS: Only compute when needed
+        should_compute_metrics = (
+            compute_metrics_every_batch or 
+            (t - last_metric_t >= metric_interval)
+        )
+        
         # LAZY METRICS: Only compute when needed (after each batch)
-        if core_count > 0:
+        if core_count > 0 and should_compute_metrics:
             # Determine number of bins
             if adaptive_binning:
                 # Estimate current radius for adaptive binning
@@ -342,11 +513,12 @@ def simulate(
             r_max = compute_front_from_core(core_ys, core_xs, core_count, cx, cy, num_angles)
             r_front, theta_front = extract_front_points(r_max, num_angles)
             
-            # Adapt batch size based on perimeter
-            if len(r_front) > 0:
+            # Update batch size if adaptive mode
+            if use_adaptive_batch and len(r_front) > 0:
                 mean_r = np.mean(r_front)
-                batch_size = int(0.2 * mean_r * two_pi)
-                batch_size = max(1, min(batch_size, 1000))  # Cap batch size
+                # batch_size = proportion × perimeter
+                batch_size = int(batch_proportion * mean_r * two_pi)
+                batch_size = max(1, min(batch_size, 10000))  # Clamp to reasonable range
             
             # Calculate N_sectors list
             urban_frac = urban_cells / total_cells
@@ -366,9 +538,10 @@ def simulate(
             row_N = [0] * k
             
             if len(r_front) > 0 and len(N_list) > 0:
-                sort_idx = np.argsort(theta_front)
-                theta_sorted = theta_front[sort_idx]
-                r_sorted = r_front[sort_idx]
+                # ⚡ OPTIMIZATION: theta_front is ALREADY SORTED!
+                # No need for np.argsort - just use directly
+                theta_sorted = theta_front  # Already monotonic from extract_front_points
+                r_sorted = r_front
                 
                 for ii in range(min(len(N_list), k)):
                     N = N_list[ii]
@@ -387,13 +560,17 @@ def simulate(
                 mean_results.append(row_mean)
                 N_sectors_results.append(row_N)
                 urban_fraction_list.append(urban_frac)
+            
+            # Update last metric time
+            last_metric_t = t
         
         # Visualization
         if visualize_interval and batch_step % visualize_interval == 0:
             urban_frac = urban_cells / total_cells
+            batch_info = f"batch={current_batch}" if not use_single_cell else "single-cell"
             print(f"Batch {batch_step} | t={t}/{timesteps} | "
                   f"filled {urban_frac*100:.2f}% | "
-                  f"batch_size={batch_size} | "
+                  f"{batch_info} | "
                   f"boundary={boundary_count} | "
                   f"bins={num_angles if core_count > 0 else 0}")
             
@@ -426,5 +603,9 @@ def simulate(
         results = {"output_file": output_file}
     
     print(f"✓ Simulation complete! | Filled {urban_cells}/{total_cells} cells ({urban_cells/total_cells*100:.1f}%)")
+    if not compute_metrics_every_batch:
+        actual_metrics_computed = (timesteps // metric_interval) + 1
+        print(f"✓ Sparse metrics: Computed {actual_metrics_computed} times instead of {batch_step} batches")
+        print(f"  → Metric overhead reduced by {(1 - actual_metrics_computed/batch_step)*100:.1f}%")
     
     return results

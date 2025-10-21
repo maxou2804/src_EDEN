@@ -20,7 +20,7 @@ import os
 # === CONFIGURABLE PARAMETERS ===
 
 grid_sizes = [2000]
-num_simulations_per_size = 3   # 🟡 CHANGE THIS to control how many runs per grid size
+num_simulations_per_size = 5   # 🟡 CHANGE THIS to control how many runs per grid size
 
 threshold = 2
 urbanization_prob = 1
@@ -31,11 +31,11 @@ k = 30
 
 def compute_timesteps(L):
     # 🟢 Replace with your actual expression
-    return int(((L/2)**2-(L/10)**2)*np.pi*0.8) 
+    return int(((L/2)**2-(L/10)**2)*np.pi*0.95) 
 
 
 # Output base directory
-base_output_dir = "C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_alpha\\simul_L_2000"
+base_output_dir = "C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_beta_z\\grid_runs_100"
 os.makedirs(base_output_dir, exist_ok=True)
 
 # === RUN SIMULATIONS ===
@@ -43,7 +43,7 @@ os.makedirs(base_output_dir, exist_ok=True)
 for size in grid_sizes:
     radius = size // 10
     timesteps = compute_timesteps(size)
-
+    metric_timesteps=np.logspace(4, 6.3, 100)
 
     print(f"\n📦 Grid size: {size}x{size} | Radius: {radius} | Timesteps: {timesteps}")
 
@@ -72,13 +72,15 @@ for size in grid_sizes:
             timesteps=timesteps,
             k=k,
             prob=1,
-            sampling=1.5,
+            sampling=0.9,
             output_file=output_file,
             batch_size_mode='adaptive',
-            batch_size_param=0.25,
-            visualize_interval=10000
-
-            )
+            metric_interval=10000,
+            batch_size_param=0.05,
+            visualize_interval=5000,
+            max_bins=20000)
+          
+        print(f"    📝 Results saved to {output_file}" )
 
       
 
