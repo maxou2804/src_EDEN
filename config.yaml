@@ -1,0 +1,13 @@
+#config.yaml
+grid_size: 500 #1000
+threshold: 2
+radius: 20
+urbanization_prob: 1 #0.05
+timesteps: 150000 #100
+distance_decay: false
+initial_core: "circle"
+sampling: 1
+k: 40
+
+
+#[2000,2500,3000,3500,4000,5000]
