@@ -11,7 +11,7 @@ from alpha_calculation_functions import read_directory, read_csv_at_time
 
 
 
-directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_V2\\simul_L_1000"  
+directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs\\simul_L_2000"  
 
 wt_avg_collection=[]
 l_avg_collection=[]
@@ -25,7 +25,7 @@ l_collection=[]
 urban_collection=[]
 
 
-time_serie= np.linspace(0.1,0.9,5)
+time_serie= np.linspace(0.5,0.9,5)
 
 
 for time in time_serie:
@@ -76,8 +76,8 @@ for time in time_serie:
     #plt.loglog(x_sorted*P_sorted**(1/3), y_sorted*P_sorted**(-2/3), 'o', label=f"data t={time}")
 
     #plt.loglog(x_sorted*P_sorted**(1/3), y_sorted*P_sorted**(-2/3), 'o', label=f"data t={time}")
-    #plt.loglog(l_avg/urban_fraction**(2/3),wt_avg/urban_fraction**(1/3), 'o', label=f"data t={time}")
-    plt.loglog(l_avg,wt_avg, 'o', label=f"data t={time}")    
+    plt.loglog(l_avg/urban_fraction**(2/3),wt_avg/urban_fraction**(1/3), 'o', label=f"data t={time}")
+    #plt.loglog(l_avg,wt_avg, 'o', label=f"data t={time}")    
     # plt.loglog(l/urban_fraction**(2/3),wt/urban_fraction**(1/3),'o',label=f"data collapsed t={time}")
     
 

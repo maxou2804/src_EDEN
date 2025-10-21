@@ -16,9 +16,9 @@ wt_collection=[]
 l_collection=[]
 
 # directory="/Users/mika/Documents/PDM/outputs/13_10_25"
-directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_V2\\simul_L_1000"
+directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_alpha\\simul_L_2000"
 #time at which we do the alpha calculation (give 0 to 1)
-time_extract=0.9
+time_extract=0.99
 
 #give points to skip for the fit
 beg_points_to_skip=0

@@ -8,6 +8,7 @@ from calculate_w import calculate_w
 from calculate_w_2 import calculate_w_2
 from save_arrays import save_arrays
 import os
+
 # Load parameters
 
 
@@ -18,23 +19,23 @@ import os
 
 # === CONFIGURABLE PARAMETERS ===
 
-grid_sizes = [500]
-num_simulations_per_size = 1   # 🟡 CHANGE THIS to control how many runs per grid size
+grid_sizes = [2000]
+num_simulations_per_size = 3   # 🟡 CHANGE THIS to control how many runs per grid size
 
 threshold = 2
 urbanization_prob = 1
 distance_decay = False
 core_shape = "circle"
 sampling = 1
-k = 40
+k = 30
 
 def compute_timesteps(L):
     # 🟢 Replace with your actual expression
-    return int(((L/2)**2-(L/10)**2)*np.pi*0.95) 
+    return int(((L/2)**2-(L/10)**2)*np.pi*0.8) 
 
 
 # Output base directory
-base_output_dir = "C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_V2\\simul_L_1000"
+base_output_dir = "C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_alpha\\simul_L_2000"
 os.makedirs(base_output_dir, exist_ok=True)
 
 # === RUN SIMULATIONS ===
@@ -70,14 +71,17 @@ for size in grid_sizes:
             city_core=city_core,
             timesteps=timesteps,
             k=k,
-            sampling=sampling,
-            sparsity_target=0.0, 
-            output_file= output_file,
+            prob=1,
+            sampling=1.5,
+            output_file=output_file,
+            batch_size_mode='adaptive',
+            batch_size_param=0.25,
             visualize_interval=10000
-        )
 
+            )
 
+      
 
-
+print("\n✅ All simulations completed.")
 
 
