@@ -16,13 +16,13 @@ wt_collection=[]
 l_collection=[]
 
 # directory="/Users/mika/Documents/PDM/outputs/13_10_25"
-directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_beta_z\\simul_L_2000"
+directory="C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_test"
 #time at which we do the alpha calculation (give 0 to 1)
-time_extract=0.99
+time_extract=0.9
 
 #give points to skip for the fit
-beg_points_to_skip=0
-end_points_to_skip=1
+beg_points_to_skip=10
+end_points_to_skip=5
 
 #extract values from cvs
 
