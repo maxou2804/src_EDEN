@@ -16,6 +16,7 @@ import requests
 from pathlib import Path
 from typing import List, Tuple, Dict
 import argparse
+import geopy
 from geopy.geocoders import Nominatim
 import time
 import json
@@ -23,6 +24,10 @@ import matplotlib.pyplot as plt
 from scipy import ndimage
 import rasterio
 from rasterio.windows import Window
+from rasterio.windows import Window
+from rasterio.merge import merge
+import pandas as pd
+from rasterio.transform import xy
 
 class WSFTileManager:
     """Manage downloading multiple WSF Evolution tiles for a region"""
@@ -337,8 +342,11 @@ def geocode_city(city_name: str) -> Tuple[float, float]:
         raise ValueError(f"Geocoding failed: {e}")
 
 
+
+
+
 class BuiltAreaAnalyzer:
-    """Analyze built-up areas from WSF Evolution data"""
+    """Analyze built-up areas from WSF Evolution data (single or multiple tiles)"""
     
     # WSF Evolution encoding: each pixel value represents the year when building was detected
     # 0 = no data/no building
@@ -347,14 +355,125 @@ class BuiltAreaAnalyzer:
     def __init__(self):
         self.years = list(range(1985, 2016))
     
-    def extract_built_area_bbox(self, raster_path: Path, 
-                                center_lat: float, center_lon: float,
-                                size_km: float = 10) -> Tuple[np.ndarray, dict]:
+    def load_tiles_from_download_result(self, download_result: Dict) -> Tuple[np.ndarray, dict]:
         """
-        Extract a bounding box around a location from the raster.
+        Load and mosaic tiles from WSFTileManager.download_region() output.
         
         Args:
-            raster_path: Path to the WSF Evolution GeoTIFF
+            download_result: Dictionary returned by WSFTileManager.download_region()
+                Must contain 'tiles' list with 'downloaded' and 'path' keys
+        
+        Returns:
+            Tuple of (mosaicked data array, metadata)
+        """
+        # Extract successfully downloaded tile paths
+        tile_paths = []
+        for tile_info in download_result['tiles']:
+            if tile_info['downloaded'] and tile_info['path']:
+                tile_path = Path(tile_info['path'])
+                if tile_path.exists():
+                    tile_paths.append(tile_path)
+        
+        if len(tile_paths) == 0:
+            raise ValueError("No tiles were successfully downloaded!")
+        
+        print(f"Loading {len(tile_paths)} tile(s)...")
+        
+        if len(tile_paths) == 1:
+            # Single tile - load directly
+            with rasterio.open(tile_paths[0]) as src:
+                data = src.read(1)
+                metadata = {
+                    'crs': src.crs,
+                    'transform': src.transform,
+                    'width': data.shape[1],
+                    'height': data.shape[0],
+                    'bounds': src.bounds,
+                    'num_tiles': 1
+                }
+                print(f"  Single tile loaded: {data.shape}")
+                return data, metadata
+        
+        else:
+            # Multiple tiles - mosaic them
+            print("  Mosaicking multiple tiles...")
+            src_files = [rasterio.open(path) for path in tile_paths]
+            
+            try:
+                # Merge tiles
+                mosaic, out_transform = merge(src_files)
+                
+                # Calculate bounds from the mosaic transform and shape
+                from rasterio.transform import array_bounds
+                mosaic_bounds = array_bounds(
+                    mosaic.shape[1],  # height
+                    mosaic.shape[2],  # width
+                    out_transform
+                )
+                
+                # Get first tile for reference metadata
+                first_src = src_files[0]
+                
+                metadata = {
+                    'crs': first_src.crs,
+                    'transform': out_transform,
+                    'width': mosaic.shape[2],
+                    'height': mosaic.shape[1],
+                    'bounds': mosaic_bounds,
+                    'num_tiles': len(tile_paths)
+                }
+                
+                # Extract first band (WSF Evolution is single band)
+                data = mosaic[0]
+                
+                print(f"  Mosaic created: {data.shape}")
+                return data, metadata
+                
+            finally:
+                # Close all source files
+                for src in src_files:
+                    src.close()
+    
+    def validate_extraction_params(self, data: np.ndarray,
+                                   transform: rasterio.Affine,
+                                   center_lat: float,
+                                   center_lon: float,
+                                   size_km: float) -> Tuple[bool, str]:
+        """
+        Validate if extraction parameters are reasonable.
+        
+        Returns:
+            (is_valid, message)
+        """
+        from rasterio.transform import rowcol
+        
+        # Check center point
+        row, col = rowcol(transform, center_lon, center_lat)
+        
+        if row < 0 or row >= data.shape[0] or col < 0 or col >= data.shape[1]:
+            return False, f"Center point ({center_lat}, {center_lon}) is outside data bounds"
+        
+        # Check if requested size is larger than data
+        pixels_per_km = 1000 / 30
+        size_pixels = int(size_km * pixels_per_km)
+        data_size_km = min(data.shape[0], data.shape[1]) * 30 / 1000
+        
+        if size_km > data_size_km:
+            return False, f"Requested size ({size_km}km) is larger than available data (~{data_size_km:.1f}km)"
+        
+        return True, "OK"
+    
+    def extract_built_area_bbox(self, data: np.ndarray, 
+                                transform: rasterio.Affine,
+                                center_lat: float, 
+                                center_lon: float,
+                                size_km: float = 10) -> Tuple[np.ndarray, dict]:
+        """
+        Extract a bounding box around a location from mosaicked data.
+        
+        Args:
+            data: Mosaicked WSF Evolution array
+            transform: Affine transform from the mosaic
             center_lat: Latitude of center point
             center_lon: Longitude of center point
             size_km: Size of bounding box in kilometers (default 10km = 10km x 10km)
@@ -362,40 +481,103 @@ class BuiltAreaAnalyzer:
         Returns:
             Array with WSF data and metadata dictionary
         """
-        with rasterio.open(raster_path) as src:
-            # Convert center point to pixel coordinates
-            row, col = src.index(center_lon, center_lat)
+        # Convert lat/lon to pixel coordinates using the transform
+        from rasterio.transform import rowcol
+        row, col = rowcol(transform, center_lon, center_lat)
+        
+        # Check if center point is within data bounds
+        if row < 0 or row >= data.shape[0] or col < 0 or col >= data.shape[1]:
+            print(f"\n⚠️  Warning: Center point ({center_lat}, {center_lon}) is outside data bounds!")
+            print(f"  Center pixel: ({row}, {col})")
+            print(f"  Data shape: {data.shape}")
+            print(f"  Adjusting to use full available data...")
             
-            # Calculate pixel extent (approximately)
-            # At 30m resolution: 1km ≈ 33.33 pixels
-            pixels_per_km = 1000 / 30  # 30m pixel size
-            half_size_pixels = int((size_km / 2) * pixels_per_km)
-            
-            # Define window
-            window = Window(
-                col - half_size_pixels,
-                row - half_size_pixels,
-                half_size_pixels * 2,
-                half_size_pixels * 2
-            )
-            
-            # Read data
-            data = src.read(1, window=window)
-            
-            # Get transform for the window
-            transform = src.window_transform(window)
-            
-            metadata = {
-                'crs': src.crs,
+            # Use the full data instead
+            return data, {
                 'transform': transform,
                 'width': data.shape[1],
                 'height': data.shape[0],
                 'center_lat': center_lat,
                 'center_lon': center_lon,
-                'size_km': size_km
+                'size_km': size_km,
+                'adjusted': True
             }
+        
+        # Calculate pixel extent (approximately)
+        # At 30m resolution: 1km ≈ 33.33 pixels
+        pixels_per_km = 1000 / 30  # 30m pixel size
+        half_size_pixels = int((size_km / 2) * pixels_per_km)
+        
+        # Define extraction bounds with clipping
+        row_start = max(0, row - half_size_pixels)
+        row_end = min(data.shape[0], row + half_size_pixels)
+        col_start = max(0, col - half_size_pixels)
+        col_end = min(data.shape[1], col + half_size_pixels)
+        
+        # Validate bounds
+        if row_start >= row_end or col_start >= col_end:
+            print(f"\n⚠️  Warning: Invalid extraction bounds!")
+            print(f"  Requested size: {size_km} km × {size_km} km")
+            print(f"  Row range: {row_start} to {row_end} (height: {row_end - row_start})")
+            print(f"  Col range: {col_start} to {col_end} (width: {col_end - col_start})")
+            print(f"  Using full data instead...")
             
-            return data, metadata
+            return data, {
+                'transform': transform,
+                'width': data.shape[1],
+                'height': data.shape[0],
+                'center_lat': center_lat,
+                'center_lon': center_lon,
+                'size_km': size_km,
+                'adjusted': True
+            }
+        
+        # Extract subset
+        subset = data[row_start:row_end, col_start:col_end]
+        
+        # Additional validation
+        if subset.shape[0] == 0 or subset.shape[1] == 0:
+            print(f"\n⚠️  Warning: Extracted subset is empty!")
+            print(f"  Using full data instead...")
+            
+            return data, {
+                'transform': transform,
+                'width': data.shape[1],
+                'height': data.shape[0],
+                'center_lat': center_lat,
+                'center_lon': center_lon,
+                'size_km': size_km,
+                'adjusted': True
+            }
+        
+        # Calculate new transform for the subset
+        from rasterio.windows import transform as window_transform, Window
+        window = Window(col_start, row_start, col_end - col_start, row_end - row_start)
+        subset_transform = window_transform(window, transform)
+        
+        metadata = {
+            'transform': subset_transform,
+            'width': subset.shape[1],
+            'height': subset.shape[0],
+            'center_lat': center_lat,
+            'center_lon': center_lon,
+            'size_km': size_km,
+            'adjusted': False
+        }
+        
+        # Report if size was adjusted due to clipping
+        actual_size_km = min(
+            (row_end - row_start) * 30 / 1000,
+            (col_end - col_start) * 30 / 1000
+        )
+        
+        if abs(actual_size_km - size_km) > 1:  # More than 1km difference
+            print(f"\n  Note: Requested {size_km}km × {size_km}km, got ~{actual_size_km:.1f}km × {actual_size_km:.1f}km")
+            print(f"  (clipped to data bounds)")
+        else:
+            print(f"Extracted {size_km}km × {size_km}km region: {subset.shape}")
+        
+        return subset, metadata
     
     def extract_year_mask(self, wsf_data: np.ndarray, year: int) -> np.ndarray:
         """
@@ -440,12 +622,34 @@ class BuiltAreaAnalyzer:
         
         return lcc_mask, int(lcc_size)
     
+    def calculate_perimeter(self, binary_mask: np.ndarray) -> Tuple[int, float]:
+        """
+        Calculate perimeter of a binary mask.
+        
+        Args:
+            binary_mask: Binary array where 1 = built, 0 = not built
+        
+        Returns:
+            Tuple of (perimeter in pixels, perimeter in km)
+        """
+        # Erode by 1 pixel
+        eroded = ndimage.binary_erosion(binary_mask)
+        
+        # Perimeter = original - eroded
+        perimeter_mask = binary_mask - eroded
+        perimeter_pixels = int(perimeter_mask.sum())
+        
+        # Convert to km (30m resolution)
+        perimeter_km = perimeter_pixels * 0.03  # 30m = 0.03km
+        
+        return perimeter_pixels, perimeter_km
+    
     def analyze_evolution(self, wsf_data: np.ndarray) -> Dict:
         """
         Analyze urban evolution across all years.
         
         Returns:
-            Dictionary with year-by-year statistics
+            Dictionary with year-by-year statistics including perimeter
         """
         results = {
             'years': [],
@@ -453,7 +657,9 @@ class BuiltAreaAnalyzer:
             'lcc_pixels': [],
             'lcc_percentage': [],
             'num_components': [],
-            'lcc_area_km2': []
+            'lcc_area_km2': [],
+            'perimeter_pixels': [],
+            'perimeter_km': []
         }
         
         pixel_area_km2 = (30 * 30) / 1e6  # 30m x 30m in km²
@@ -463,6 +669,9 @@ class BuiltAreaAnalyzer:
             total_built = mask.sum()
             
             lcc_mask, lcc_size = self.find_largest_connected_component(mask)
+            
+            # Calculate perimeter
+            perim_pixels, perim_km = self.calculate_perimeter(lcc_mask)
             
             # Count total number of components
             labeled_array, num_components = ndimage.label(mask)
@@ -476,10 +685,12 @@ class BuiltAreaAnalyzer:
             results['lcc_percentage'].append(round(lcc_pct, 2))
             results['num_components'].append(num_components)
             results['lcc_area_km2'].append(round(lcc_area, 3))
+            results['perimeter_pixels'].append(perim_pixels)
+            results['perimeter_km'].append(round(perim_km, 2))
             
-            print(f"{year}: Total={total_built:,} px, LCC={lcc_size:,} px "
-                  f"({lcc_pct:.1f}%), Components={num_components}, "
-                  f"LCC Area={lcc_area:.3f} km²")
+            print(f"{year}: LCC={lcc_size:,} px ({lcc_area:.2f} km²), "
+                  f"Perimeter={perim_pixels:,} px ({perim_km:.1f} km), "
+                  f"Components={num_components}")
         
         return results
     
@@ -496,7 +707,10 @@ class BuiltAreaAnalyzer:
                 break
                 
             mask = self.extract_year_mask(wsf_data, year)
-            lcc_mask, _ = self.find_largest_connected_component(mask)
+            lcc_mask, lcc_size = self.find_largest_connected_component(mask)
+            
+            # Calculate perimeter
+            perim_pixels, perim_km = self.calculate_perimeter(lcc_mask)
             
             # Create RGB visualization
             rgb = np.zeros((*mask.shape, 3), dtype=np.uint8)
@@ -504,7 +718,7 @@ class BuiltAreaAnalyzer:
             rgb[lcc_mask == 1] = [255, 0, 0]  # Red for LCC
             
             axes[idx].imshow(rgb)
-            axes[idx].set_title(f'{year}')
+            axes[idx].set_title(f'{year}\nLCC: {lcc_size:,} px\nPerim: {perim_km:.1f} km')
             axes[idx].axis('off')
         
         # Hide extra subplot
@@ -520,10 +734,300 @@ class BuiltAreaAnalyzer:
         else:
             plt.show()
 
+def analyze_from_download_result(download_result: Dict, 
+                                  center_lat: float = None,
+                                  center_lon: float = None,
+                                  size_km: float = None,
+                                  output_path: str = None) -> Dict:
+    """
+    Convenience function to analyze tiles from download_region() result.
+    
+    Args:
+        download_result: Output from WSFTileManager.download_region()
+        center_lat: Optional center latitude to extract subset
+        center_lon: Optional center longitude to extract subset
+        size_km: Optional size for subset extraction (km)
+        output_path: Optional path to save visualization
+    
+    Returns:
+        Dictionary with analysis results
+    """
+    analyzer = BuiltAreaAnalyzer()
+    
+    # Load and mosaic tiles
+    print("="*70)
+    print("LOADING TILES")
+    print("="*70)
+    data, metadata = analyzer.load_tiles_from_download_result(download_result)
+    
+    # Extract subset if requested
+    if center_lat is not None and center_lon is not None and size_km is not None:
+        print("\n" + "="*70)
+        print("EXTRACTING REGION OF INTEREST")
+        print("="*70)
+        data, metadata = analyzer.extract_built_area_bbox(
+            data, metadata['transform'], center_lat, center_lon, size_km
+        )
+    
+    # Analyze evolution
+    print("\n" + "="*70)
+    print("ANALYZING URBAN EVOLUTION")
+    print("="*70)
+    results = analyzer.analyze_evolution(data)
+    
+    # Create visualization
+    if output_path:
+        print("\n" + "="*70)
+        print("CREATING VISUALIZATION")
+        print("="*70)
+        analyzer.visualize_evolution(data, output_path)
+    
+    return results
+
+
+
+def analyze_from_download_result(download_result: Dict, 
+                                  center_lat: float = None,
+                                  center_lon: float = None,
+                                  size_km: float = None,
+                                  output_path: str = None) -> Dict:
+    """
+    Convenience function to analyze tiles from download_region() result.
+    
+    Args:
+        download_result: Output from WSFTileManager.download_region()
+        center_lat: Optional center latitude to extract subset
+        center_lon: Optional center longitude to extract subset
+        size_km: Optional size for subset extraction (km)
+        output_path: Optional path to save visualization
+    
+    Returns:
+        Dictionary with analysis results
+    """
+    analyzer = BuiltAreaAnalyzer()
+    
+    # Load and mosaic tiles
+    print("="*70)
+    print("LOADING TILES")
+    print("="*70)
+    data, metadata = analyzer.load_tiles_from_download_result(download_result)
+    
+    # Extract subset if requested
+    if center_lat is not None and center_lon is not None and size_km is not None:
+        print("\n" + "="*70)
+        print("EXTRACTING REGION OF INTEREST")
+        print("="*70)
+        data, metadata = analyzer.extract_built_area_bbox(
+            data, metadata['transform'], center_lat, center_lon, size_km
+        )
+    
+    # Analyze evolution
+    print("\n" + "="*70)
+    print("ANALYZING URBAN EVOLUTION")
+    print("="*70)
+    results = analyzer.analyze_evolution(data)
+    
+    # Create visualization
+    if output_path:
+        print("\n" + "="*70)
+        print("CREATING VISUALIZATION")
+        print("="*70)
+        analyzer.visualize_evolution(data, output_path)
+    
+    return results
+
+
+def mask_to_coordinates(mask: np.ndarray, transform: rasterio.Affine) -> pd.DataFrame:
+    """
+    Convert binary mask to dataframe with pixel coordinates.
+    
+    Args:
+        mask: Binary mask (1 = LCC, 0 = not LCC)
+        transform: Affine transform for geographic coordinates
+    
+    Returns:
+        DataFrame with columns: row, col, latitude, longitude
+    """
+    # Get pixel indices where mask is 1
+    rows, cols = np.where(mask == 1)
+    
+    # Convert pixel coordinates to geographic coordinates
+    lats = []
+    lons = []
+    
+    for row, col in zip(rows, cols):
+        # Get center of pixel in geographic coordinates
+        lon, lat = xy(transform, row, col, offset='center')
+        lats.append(lat)
+        lons.append(lon)
+    
+    return pd.DataFrame({
+        'row': rows,
+        'col': cols,
+        'latitude': lats,
+        'longitude': lons
+    })
+
+
+def export_lcc_coordinates_all_years(wsf_data: np.ndarray,
+                                     transform: rasterio.Affine,
+                                     analyzer: BuiltAreaAnalyzer,
+                                     output_path: str,
+                                     years: List[int] = None) -> str:
+    """
+    Export LCC coordinates for all years to CSV.
+    
+    Args:
+        wsf_data: WSF Evolution array
+        transform: Affine transform
+        analyzer: BuiltAreaAnalyzer instance
+        output_path: Output CSV file path
+        years: List of years to export (default: 1985-2015)
+    
+    Returns:
+        Path to saved CSV file
+    """
+    if years is None:
+        years = list(range(1985, 2016))
+    
+    all_data = []
+    
+    print("\nExtracting LCC coordinates for each year...")
+    print("-" * 70)
+    
+    for idx, year in enumerate(years, 1):
+        print(f"Processing {year} ({idx}/{len(years)})...", end='\r')
+        
+        # Extract mask for this year
+        mask = analyzer.extract_year_mask(wsf_data, year)
+        
+        # Get LCC
+        lcc_mask, lcc_size = analyzer.find_largest_connected_component(mask)
+        
+        if lcc_size == 0:
+            print(f"  Year {year}: No LCC found, skipping")
+            continue
+        
+        # Convert mask to coordinates
+        coords_df = mask_to_coordinates(lcc_mask, transform)
+        
+        # Add year column
+        coords_df['year'] = year
+        
+        # Add to list
+        all_data.append(coords_df)
+        
+        print(f"  Year {year}: {lcc_size:,} pixels extracted", end='\r')
+    
+    print("\n" + "-" * 70)
+    
+    # Combine all years
+    print("\nCombining data from all years...")
+    combined_df = pd.concat(all_data, ignore_index=True)
+    
+    # Reorder columns: year, latitude, longitude, row, col
+    combined_df = combined_df[['year', 'latitude', 'longitude', 'row', 'col']]
+    
+    # Save to CSV
+    output_path = Path(output_path)
+    combined_df.to_csv(output_path, index=False)
+    
+    print(f"✓ Saved: {output_path}")
+    print(f"  Total pixels: {len(combined_df):,}")
+    print(f"  Years: {combined_df['year'].min()}-{combined_df['year'].max()}")
+    print(f"  File size: {output_path.stat().st_size / (1024*1024):.2f} MB")
+    
+    return str(output_path)
 
 
 
 
+
+# Example usage
+if __name__ == "__main__":
+    """
+    Example: How to use with WSFTileManager
+    """
+    
+    # Example 1: Direct usage with download result
+    print("""
+EXAMPLE USAGE:
+==============
+
+# Step 1: Download tiles
+from download_city_tiles import WSFTileManager
+
+manager = WSFTileManager(cache_dir="./wsf_cache")
+download_result = manager.download_region(
+    center_lat=31.8122,
+    center_lon=119.9692,
+    radius_km=25
+)
+
+# Step 2: Analyze the downloaded tiles
+from built_area_analyzer import analyze_from_download_result
+
+results = analyze_from_download_result(
+    download_result=download_result,
+    center_lat=31.8122,
+    center_lon=119.9692,
+    size_km=50,  # Extract 50km x 50km region
+    output_path="urban_evolution.png"
+)
+
+# Step 3: Use the results
+import pandas as pd
+df = pd.DataFrame(results)
+print(df)
+
+# Access specific metrics
+print(f"2015 LCC area: {results['lcc_area_km2'][-1]} km²")
+print(f"2015 Perimeter: {results['perimeter_km'][-1]} km")
+    """)
+    
+    # Example 2: Manual step-by-step
+    print("""
+MANUAL STEP-BY-STEP:
+====================
+
+# Step 1: Download tiles
+from download_city_tiles import WSFTileManager
+
+manager = WSFTileManager(cache_dir="./wsf_cache")
+download_result = manager.download_region(
+    center_lat=31.8122,
+    center_lon=119.9692,
+    radius_km=25
+)
+
+# Step 2: Create analyzer
+from built_area_analyzer import BuiltAreaAnalyzer
+
+analyzer = BuiltAreaAnalyzer()
+
+# Step 3: Load tiles
+data, metadata = analyzer.load_tiles_from_download_result(download_result)
+
+# Step 4: Extract region (optional)
+data_subset, meta_subset = analyzer.extract_built_area_bbox(
+    data=data,
+    transform=metadata['transform'],
+    center_lat=31.8122,
+    center_lon=119.9692,
+    size_km=50
+)
+
+# Step 5: Analyze
+results = analyzer.analyze_evolution(data_subset)
+
+# Step 6: Visualize
+analyzer.visualize_evolution(data_subset, "evolution.png")
+
+# Step 7: Create DataFrame
+import pandas as pd
+df = pd.DataFrame(results)
+df.to_csv("timeseries.csv", index=False)
+    """)
 
 
 
