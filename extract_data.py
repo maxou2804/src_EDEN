@@ -7,12 +7,12 @@ downloader = WSFTileManager(cache_dir="./wsf_cache")
 # find the lat and lon of the city trough its name
 
 
-name_city="Beijing"
+name_city="Mexico City"
 output_path="/Users/mika/Documents/PDM/src_EDEN_git/src_EDEN-1/masks/Mexico_City"
 
 lat,lon=geocode_city(name_city)
 # calculates the required tiles based on the position and the radius
-tiles = downloader.calculate_required_tiles(lat, lon, radius_km=50)
+tiles = downloader.calculate_required_tiles(lat, lon, radius_km=100)
 
 # downloads the corresponding tiles
 results= downloader.download_region(lat,lon, radius_km=50)
@@ -39,4 +39,4 @@ data_subset, meta_subset = analyzer.extract_built_area_bbox(
 )
 
 data=extract_perimeter_from_bbox_optimized(data_subset,meta_subset['transform'],10000 ,use_numba=True)  
-data.to_csv('perimeter_beijing.csv', index=False)
+data.to_csv('perimeter_mexico_city.csv', index=False)
