@@ -19,7 +19,7 @@ import os
 
 # === CONFIGURABLE PARAMETERS ===
 
-grid_sizes = [2000]
+grid_sizes = [801]
 num_simulations_per_size = 1  # 🟡 CHANGE THIS to control how many runs per grid size
 
 threshold = 2
@@ -31,19 +31,20 @@ k = 30
 
 def compute_timesteps(L):
     # 🟢 Replace with your actual expression
-    return int(((L/2)**2-(L/10)**2)*np.pi*0.9)
+    return int(((L/2)**2)*np.pi)
 
 
 # Output base directory
-base_output_dir = "C:\\Users\\trique\\Downloads\\MASTER_THESIS\\outputs\\grid_runs_test"
+base_output_dir = "/Users/mika/Documents/PDM/outputs/grid_runs_test"
 os.makedirs(base_output_dir, exist_ok=True)
 
 # === RUN SIMULATIONS ===
 
 for size in grid_sizes:
-    radius = size // 10
+    #radius = size // 10
+    radius=3
     timesteps = compute_timesteps(size)
-    metric_timesteps=np.logspace(4, 6.3, 100)
+   
 
     print(f"\n📦 Grid size: {size}x{size} | Radius: {radius} | Timesteps: {timesteps}")
 
@@ -52,7 +53,7 @@ for size in grid_sizes:
 
         # Random grid and city core
         grid = np.random.rand(size, size)
-        city_core = create_city_core(size, radius, shape=core_shape)
+        city_core = create_city_core(size, 10, shape=core_shape)
 
         # Initialize urban array
         urban_array = (grid > threshold).astype(int)
@@ -67,20 +68,18 @@ for size in grid_sizes:
         # Run simulation
         result = simulate(
             grid_size=size,
-            urban=urban_array,
-            city_core=city_core,
             timesteps=timesteps,
             k=k,
-            prob=1,
             sampling=1,
-            adaptive_binning=True,
-            use_binning=False,
+            adaptive_binning=False,
+            use_binning=True,
             output_file=output_file,
             batch_size_param=0,
             batch_size_mode='single',
-            metric_interval=100000,
-            visualize_interval=50000,
-            max_bins=20000)
+            metric_interval=10000,
+            visualize_interval=10000,
+            use_ray_marching=True,  
+            ray_step=0.5)
           
         print(f"    📝 Results saved to {output_file}" )
 

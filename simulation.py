@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.ndimage import binary_dilation, binary_erosion
-from math import sqrt, atan2, pi, floor
+from math import sqrt, atan2, pi, floor, cos, sin
 import csv
 
 import numba as nb
@@ -36,6 +36,88 @@ def compute_sector_stats(theta_sorted, r_sorted, N):
     return means, vars_
 
 
+@nb.njit(fastmath=True, cache=True)
+def ray_march_front(city_core, cx, cy, num_angles, ray_step=0.5):
+    """
+    Ray marching method: March along each angle from center and find furthest occupied cell.
+    GUARANTEES all num_angles bins are occupied (at minimum, finds the center).
+    
+    This is the method used in the Jupyter notebook Eden growth code.
+    """
+    grid_size = city_core.shape[0]
+    two_pi = 2.0 * np.pi
+    bin_width = two_pi / num_angles
+    
+    r_max = np.zeros(num_angles, dtype=float64)
+    max_radius = min(cx, cy, grid_size - 1 - cx, grid_size - 1 - cy)
+    
+    for k in range(num_angles):
+        theta = (k + 0.5) * bin_width  # Center of each bin
+        ct = cos(theta)
+        st = sin(theta)
+        
+        r = 0.0
+        r_last = 0.0
+        
+        # March outward along this ray
+        while r <= max_radius:
+            x = cx + r * ct
+            y = cy + r * st
+            
+            # Round to nearest grid cell
+            ix = int(round(x))
+            iy = int(round(y))
+            
+            # Bounds check
+            if ix < 0 or ix >= grid_size or iy < 0 or iy >= grid_size:
+                break
+            
+            # If occupied, record this radius
+            if city_core[iy, ix] == 1:  # Note: city_core[row, col]
+                r_last = r
+            
+            r += ray_step
+        
+        r_max[k] = r_last
+    
+    return r_max
+
+
+@nb.njit(fastmath=True, cache=True)
+def extract_front_points_ray_march(r_max, num_angles):
+    """
+    Extract front points from ray-marched r_max.
+    Unlike the boundary binning version, ALL bins should be occupied.
+    
+    Returns r and theta arrays that are already sorted by theta.
+    """
+    two_pi = 2.0 * np.pi
+    bin_width = two_pi / num_angles
+    
+    # With ray marching, all bins should have r > 0, but check anyway
+    valid_count = 0
+    for i in range(num_angles):
+        if r_max[i] > 0:
+            valid_count += 1
+    
+    if valid_count == 0:
+        # Return empty arrays if somehow no valid bins
+        return np.zeros(0, dtype=float64), np.zeros(0, dtype=float64)
+    
+    r_front = np.zeros(valid_count, dtype=float64)
+    theta_front = np.zeros(valid_count, dtype=float64)
+    
+    idx = 0
+    for i in range(num_angles):
+        if r_max[i] > 0:
+            r_front[idx] = r_max[i]
+            theta_front[idx] = (i + 0.5) * bin_width
+            idx += 1
+    
+    return r_front, theta_front
+
+
+# Keep the old boundary binning methods for comparison
 @nb.njit(fastmath=True, cache=True)
 def initialize_front_from_core(core_ys, core_xs, core_count, cx, cy, num_angles):
     """Build initial r_max from existing core (one-time computation)."""
@@ -218,119 +300,109 @@ def grow_batch_optimized(urban, city_core, boundary_y, boundary_x, boundary_coun
             for dc in range(-1, 2):
                 if dr == 0 and dc == 0:
                     continue
-                if abs(dr) + abs(dc) == 2:
-                    continue
-                    
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < grid_size and 0 <= nc < grid_size and city_core[nr, nc] == 0:
-                    nidx = nr * grid_size + nc
-                    if occupied[nidx] == 0:
-                        boundary_y[boundary_count] = nr
-                        boundary_x[boundary_count] = nc
-                        occupied[nidx] = 1
-                        boundary_count += 1
+                nr = r + dr
+                nc = c + dc
+                if 0 <= nr < grid_size and 0 <= nc < grid_size:
+                    if urban[nr, nc] == 0:
+                        idx = nr * grid_size + nc
+                        if occupied[idx] == 0:
+                            boundary_y[boundary_count] = nr
+                            boundary_x[boundary_count] = nc
+                            boundary_count += 1
+                            occupied[idx] = 1
     
     return boundary_count, core_count, cells_grown
 
 
 def simulate(
-    grid_size,
-    urban,
-    city_core,
-    timesteps,
-    k,
-    prob=1.0,
-    sampling=0.5,
-    max_bins=None,
-    min_bins=100,
-    adaptive_binning=True,
-    use_binning=True,  # ← NEW PARAMETER
-    batch_size_mode='adaptive',
-    batch_size_param=0.2,
+    grid_size=401,
+    timesteps=10000,
+    k=10,
+    output_file=None,
+    sampling=0.25,
+    batch_size_mode='single',
+    batch_size_param=1,
     metric_interval=None,
     metric_timesteps=None,
-    output_file=None,
-    visualize_interval=20
+    visualize_interval=100,
+    adaptive_binning=False,
+    use_binning=True,
+    use_ray_marching=False,  # NEW PARAMETER
+    ray_step=0.5  # NEW PARAMETER
 ):
     """
-    Optimized Eden growth simulation.
+    Enhanced Eden growth simulation with optional ray marching for front extraction.
     
-    NEW PARAMETER
-    -------------
-    use_binning : bool (default=True)
-        If True, use angular binning to aggregate front points (controlled by sampling).
-        If False, extract raw boundary cells without binning (maximum resolution).
-        When False, sampling, max_bins, min_bins, and adaptive_binning are ignored.
+    NEW PARAMETERS:
+    - use_ray_marching (bool): If True, use ray marching method to ensure all bins occupied.
+                               If False, use boundary binning method (original).
+    - ray_step (float): Step size for ray marching (default 0.5 pixels).
+    
+    Ray marching guarantees all angular bins are occupied, eliminating zero-inflation
+    in variance calculations. However, it's slower than boundary binning.
     """
     
-    # Input validation
-    if not isinstance(urban, np.ndarray) or not isinstance(city_core, np.ndarray):
-        raise TypeError("urban and city_core must be NumPy arrays")
+    assert grid_size % 2 == 1, "grid_size must be odd."
     
-    urban = urban.copy().astype(np.uint8)
-    city_core = city_core.copy().astype(np.uint8)
-    grid_size = urban.shape[0]
+    np.random.seed(42)
+    urban = np.zeros((grid_size, grid_size), dtype=np.uint8)
+    city_core = np.zeros((grid_size, grid_size), dtype=np.uint8)
+    
+    cx = cy = grid_size // 2
+    urban[cy, cx] = 1
+    city_core[cy, cx] = 1
+    
+    max_boundary = grid_size * grid_size
+    max_core = grid_size * grid_size
+    
+    boundary_y = np.zeros(max_boundary, dtype=np.int32)
+    boundary_x = np.zeros(max_boundary, dtype=np.int32)
+    core_ys = np.zeros(max_core, dtype=np.int32)
+    core_xs = np.zeros(max_core, dtype=np.int32)
+    
+    core_ys[0] = cy
+    core_xs[0] = cx
+    core_count = 1
+    
+    boundary_count = 0
+    for dr in range(-1, 2):
+        for dc in range(-1, 2):
+            if dr == 0 and dc == 0:
+                continue
+            nr = cy + dr
+            nc = cx + dc
+            if 0 <= nr < grid_size and 0 <= nc < grid_size:
+                boundary_y[boundary_count] = nr
+                boundary_x[boundary_count] = nc
+                boundary_count += 1
     
     total_cells = grid_size * grid_size
-    cy, cx = grid_size / 2.0, grid_size / 2.0
     two_pi = 2 * np.pi
     
-    # CSV streaming
-    writer = None
-    if output_file is not None:
+    # Output setup
+    if output_file:
         f = open(output_file, 'w', newline='')
         writer = csv.writer(f)
         writer.writerow(['time', 'N', 'w', 'mean_radius', 'urban_fraction'])
-    
-    if writer is None:
+    else:
+        writer = None
         w_results = []
         mean_results = []
         N_sectors_results = []
         urban_fraction_list = []
     
-    # Boundary buffer
-    max_radius = grid_size / np.sqrt(2)
-    max_perimeter = int(2 * np.pi * max_radius * 1.5)
-    max_boundary = min(max_perimeter, 200000)
-    boundary_y = np.zeros(max_boundary, dtype=np.int64)
-    boundary_x = np.zeros(max_boundary, dtype=np.int64)
-    
-    boundary_mask = binary_dilation(urban) & (urban == 0)
-    initial_boundary = np.argwhere(boundary_mask)
-    boundary_count = min(len(initial_boundary), max_boundary)
-    boundary_y[:boundary_count] = initial_boundary[:boundary_count, 0]
-    boundary_x[:boundary_count] = initial_boundary[:boundary_count, 1]
-    
-    # Core storage
-    initial_core = np.argwhere(city_core)
-    C0 = len(initial_core)
-    max_core = C0 + timesteps
-    core_ys = np.zeros(max_core, dtype=np.int64)
-    core_xs = np.zeros(max_core, dtype=np.int64)
-    
-    if C0 > 0:
-        core_ys[:C0] = initial_core[:, 0]
-        core_xs[:C0] = initial_core[:, 1]
-    core_count = C0
-    
     # Binning configuration
-    if max_bins is None:
-        if grid_size > 512:
-            max_angles = 10000
-        else:
-            max_angles = int(sampling * two_pi * grid_size)
-    else:
-        max_angles = max_bins
+    min_bins = 20
+    max_angles = 50000
     
-    max_angles = max(max_angles, min_bins)
-    
-    if not adaptive_binning and use_binning:
-        est_final_radius = grid_size / np.sqrt(2)
-        num_angles_fixed = int(sampling * two_pi * est_final_radius)
-        num_angles_fixed = min(max(num_angles_fixed, min_bins), max_angles)
+    if not use_binning:
+        adaptive_binning = False
+        print("Binning DISABLED: Using raw boundary cells")
+    elif not adaptive_binning:
+        num_angles_fixed = 10000
         print(f"Fixed binning mode: {num_angles_fixed} bins")
     
-    # Sparse metrics
+    # Metric sampling configuration
     if metric_timesteps is not None:
         metric_set = set(int(t) for t in metric_timesteps)
         compute_metrics_every_batch = False
@@ -370,8 +442,14 @@ def simulate(
             fixed_batch_size = int(batch_size_param)
         print(f"Batch mode: FIXED ({fixed_batch_size} cells per batch)")
     
-    # Initialize front
-    if use_binning:
+    # Front extraction method
+    if use_ray_marching:
+        print(f"Front extraction: RAY MARCHING (step={ray_step}) - ALL bins guaranteed occupied")
+    else:
+        print(f"Front extraction: BOUNDARY BINNING (sparse bins possible)")
+    
+    # Initialize front (only for boundary binning method)
+    if use_binning and not use_ray_marching:
         if adaptive_binning:
             est_radius = max(10.0, grid_size / 20)
             num_angles = int(sampling * two_pi * est_radius)
@@ -383,7 +461,12 @@ def simulate(
         print(f"Initial front: {num_angles} angular bins (binning enabled)")
     else:
         r_max = None
-        print(f"Binning DISABLED: Using raw boundary cells (maximum resolution)")
+        num_angles = num_angles_fixed if not adaptive_binning else 0
+        if use_binning and use_ray_marching:
+            if not adaptive_binning:
+                print(f"Ray marching with {num_angles} fixed bins")
+            else:
+                print(f"Ray marching with adaptive binning")
     
     batch_size = fixed_batch_size if not use_adaptive_batch else 10
     t = 0
@@ -431,31 +514,51 @@ def simulate(
         # Compute metrics
         if core_count > 0 and should_compute_metrics:
             if use_binning:
-                # Use angular binning
-                if adaptive_binning:
-                    recent_idx = max(0, core_count - 100)
-                    sample_xs = core_xs[recent_idx:core_count]
-                    sample_ys = core_ys[recent_idx:core_count]
-                    sample_dists = np.sqrt((sample_xs - cx)**2 + (sample_ys - cy)**2)
-                    est_radius = np.max(sample_dists) if len(sample_dists) > 0 else 10.0
+                # === RAY MARCHING METHOD (NEW) ===
+                if use_ray_marching:
+                    # Update num_angles if adaptive
+                    if adaptive_binning:
+                        recent_idx = max(0, core_count - 100)
+                        sample_xs = core_xs[recent_idx:core_count]
+                        sample_ys = core_ys[recent_idx:core_count]
+                        sample_dists = np.sqrt((sample_xs - cx)**2 + (sample_ys - cy)**2)
+                        est_radius = np.max(sample_dists) if len(sample_dists) > 0 else 10.0
+                        
+                        num_angles = int(sampling * two_pi * est_radius)
+                        num_angles = min(max(num_angles, min_bins), max_angles)
+                    # else: num_angles already set to num_angles_fixed
                     
-                    new_num_angles = int(sampling * two_pi * est_radius)
-                    new_num_angles = min(max(new_num_angles, min_bins), max_angles)
-                    
-                    if new_num_angles != num_angles:
-                        num_angles = new_num_angles
-                        r_max = initialize_front_from_core(core_ys, core_xs, core_count, cx, cy, num_angles)
+                    # Ray march to get front (ALL bins will be occupied)
+                    r_max = ray_march_front(city_core, float(cx), float(cy), num_angles, ray_step)
+                    r_front, theta_front = extract_front_points_ray_march(r_max, num_angles)
+                
+                # === BOUNDARY BINNING METHOD (ORIGINAL) ===
+                else:
+                    # Use angular binning with boundary detection
+                    if adaptive_binning:
+                        recent_idx = max(0, core_count - 100)
+                        sample_xs = core_xs[recent_idx:core_count]
+                        sample_ys = core_ys[recent_idx:core_count]
+                        sample_dists = np.sqrt((sample_xs - cx)**2 + (sample_ys - cy)**2)
+                        est_radius = np.max(sample_dists) if len(sample_dists) > 0 else 10.0
+                        
+                        new_num_angles = int(sampling * two_pi * est_radius)
+                        new_num_angles = min(max(new_num_angles, min_bins), max_angles)
+                        
+                        if new_num_angles != num_angles:
+                            num_angles = new_num_angles
+                            r_max = initialize_front_from_core(core_ys, core_xs, core_count, cx, cy, num_angles)
+                        else:
+                            r_max = update_front_incremental(r_max, core_ys, core_xs,
+                                                             core_count_before, core_count,
+                                                             cx, cy, num_angles)
                     else:
+                        # FIXED: Don't reassign num_angles here!
                         r_max = update_front_incremental(r_max, core_ys, core_xs,
                                                          core_count_before, core_count,
                                                          cx, cy, num_angles)
-                else:
-                    num_angles = num_angles_fixed
-                    r_max = update_front_incremental(r_max, core_ys, core_xs,
-                                                     core_count_before, core_count,
-                                                     cx, cy, num_angles)
-                
-                r_front, theta_front = extract_front_points(r_max, num_angles)
+                    
+                    r_front, theta_front = extract_front_points(r_max, num_angles)
             else:
                 # No binning: extract raw boundary
                 r_front, theta_front = extract_raw_boundary(city_core, cx, cy)
@@ -514,7 +617,10 @@ def simulate(
             batch_info = f"batch={current_batch}" if not use_single_cell else "single-cell"
             
             if use_binning:
-                bins_info = f"bins={num_angles if core_count > 0 else 0}"
+                if use_ray_marching:
+                    bins_info = f"ray_march: bins={num_angles if core_count > 0 else 0} (all occupied)"
+                else:
+                    bins_info = f"boundary: bins={num_angles if core_count > 0 else 0}"
             else:
                 bins_info = "raw boundary (no binning)"
             

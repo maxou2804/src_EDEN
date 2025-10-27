@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../outputs/grid_runs_test"
+		}
+	],
+	"settings": {}
+}
