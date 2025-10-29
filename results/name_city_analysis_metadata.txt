@@ -1,0 +1,9 @@
+URBAN CLUSTERS GROWTH ANALYSIS - METADATA
+============================================================
+
+start_year: 1985
+end_year: 1990
+n_years: 5
+n_clusters_tracked: 6
+pixel_resolution_m: 30
+pixel_area_km2: 0.0009

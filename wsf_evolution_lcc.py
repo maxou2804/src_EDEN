@@ -944,90 +944,90 @@ def export_lcc_coordinates_all_years(wsf_data: np.ndarray,
 
 
 # Example usage
-if __name__ == "__main__":
-    """
-    Example: How to use with WSFTileManager
-    """
+# if __name__ == "__main__":
+#     """
+#     Example: How to use with WSFTileManager
+#     """
     
-    # Example 1: Direct usage with download result
-    print("""
-EXAMPLE USAGE:
-==============
+#     # Example 1: Direct usage with download result
+#     print("""
+# EXAMPLE USAGE:
+# ==============
 
-# Step 1: Download tiles
-from download_city_tiles import WSFTileManager
+# # Step 1: Download tiles
+# from download_city_tiles import WSFTileManager
 
-manager = WSFTileManager(cache_dir="./wsf_cache")
-download_result = manager.download_region(
-    center_lat=31.8122,
-    center_lon=119.9692,
-    radius_km=25
-)
+# manager = WSFTileManager(cache_dir="./wsf_cache")
+# download_result = manager.download_region(
+#     center_lat=31.8122,
+#     center_lon=119.9692,
+#     radius_km=25
+# )
 
-# Step 2: Analyze the downloaded tiles
-from built_area_analyzer import analyze_from_download_result
+# # Step 2: Analyze the downloaded tiles
+# from built_area_analyzer import analyze_from_download_result
 
-results = analyze_from_download_result(
-    download_result=download_result,
-    center_lat=31.8122,
-    center_lon=119.9692,
-    size_km=50,  # Extract 50km x 50km region
-    output_path="urban_evolution.png"
-)
+# results = analyze_from_download_result(
+#     download_result=download_result,
+#     center_lat=31.8122,
+#     center_lon=119.9692,
+#     size_km=50,  # Extract 50km x 50km region
+#     output_path="urban_evolution.png"
+# )
 
-# Step 3: Use the results
-import pandas as pd
-df = pd.DataFrame(results)
-print(df)
+# # Step 3: Use the results
+# import pandas as pd
+# df = pd.DataFrame(results)
+# print(df)
 
-# Access specific metrics
-print(f"2015 LCC area: {results['lcc_area_km2'][-1]} km²")
-print(f"2015 Perimeter: {results['perimeter_km'][-1]} km")
-    """)
+# # Access specific metrics
+# print(f"2015 LCC area: {results['lcc_area_km2'][-1]} km²")
+# print(f"2015 Perimeter: {results['perimeter_km'][-1]} km")
+#     """)
     
-    # Example 2: Manual step-by-step
-    print("""
-MANUAL STEP-BY-STEP:
-====================
+#     # Example 2: Manual step-by-step
+#     print("""
+# MANUAL STEP-BY-STEP:
+# ====================
 
-# Step 1: Download tiles
-from download_city_tiles import WSFTileManager
+# # Step 1: Download tiles
+# from download_city_tiles import WSFTileManager
 
-manager = WSFTileManager(cache_dir="./wsf_cache")
-download_result = manager.download_region(
-    center_lat=31.8122,
-    center_lon=119.9692,
-    radius_km=25
-)
+# manager = WSFTileManager(cache_dir="./wsf_cache")
+# download_result = manager.download_region(
+#     center_lat=31.8122,
+#     center_lon=119.9692,
+#     radius_km=25
+# )
 
-# Step 2: Create analyzer
-from built_area_analyzer import BuiltAreaAnalyzer
+# # Step 2: Create analyzer
+# from built_area_analyzer import BuiltAreaAnalyzer
 
-analyzer = BuiltAreaAnalyzer()
+# analyzer = BuiltAreaAnalyzer()
 
-# Step 3: Load tiles
-data, metadata = analyzer.load_tiles_from_download_result(download_result)
+# # Step 3: Load tiles
+# data, metadata = analyzer.load_tiles_from_download_result(download_result)
 
-# Step 4: Extract region (optional)
-data_subset, meta_subset = analyzer.extract_built_area_bbox(
-    data=data,
-    transform=metadata['transform'],
-    center_lat=31.8122,
-    center_lon=119.9692,
-    size_km=50
-)
+# # Step 4: Extract region (optional)
+# data_subset, meta_subset = analyzer.extract_built_area_bbox(
+#     data=data,
+#     transform=metadata['transform'],
+#     center_lat=31.8122,
+#     center_lon=119.9692,
+#     size_km=50
+# )
 
-# Step 5: Analyze
-results = analyzer.analyze_evolution(data_subset)
+# # Step 5: Analyze
+# results = analyzer.analyze_evolution(data_subset)
 
-# Step 6: Visualize
-analyzer.visualize_evolution(data_subset, "evolution.png")
+# # Step 6: Visualize
+# analyzer.visualize_evolution(data_subset, "evolution.png")
 
-# Step 7: Create DataFrame
-import pandas as pd
-df = pd.DataFrame(results)
-df.to_csv("timeseries.csv", index=False)
-    """)
+# # Step 7: Create DataFrame
+# import pandas as pd
+# df = pd.DataFrame(results)
+# df.to_csv("timeseries.csv", index=False)
+#     """)
 
 
 
